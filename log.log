@@ -1,0 +1,8 @@
+multi prompt coco_few_shot_100_1: 126:/data/D/zyj/code/yoloworld-prompt-tuning/ultralytics-prompt-tuning-yoloworld/runs/train2
+multi prompt coco_few_shot_16_1: 126:/data/D/zyj/code/yoloworld-prompt-tuning/ultralytics-prompt-tuning-yoloworld/runs/train3
+multi prompt coco: 
+
+single prompt coco_few_shot_100_1: 138:/datanew/zyj/code/yoloworld-prompt-tuning/ultralytics-single-prompt-tuning-yoloworld/runs/train5
+single prompt coco_few_shot_16_1: 138:/datanew/zyj/code/yoloworld-prompt-tuning/ultralytics-single-prompt-tuning-yoloworld/runs/train8
+single prompt coco 257: /data/zyj-ll/code/yoloworld-prompt-tuning/ultralytics-single-prompt-tuning-yoloworld/runs/train
+
