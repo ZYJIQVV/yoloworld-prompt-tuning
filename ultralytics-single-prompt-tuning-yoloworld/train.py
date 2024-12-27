@@ -18,15 +18,24 @@ if __name__ == '__main__':
     parser.add_argument('--project', type=str, default='runs', help='project name')
     parser.add_argument('--name', type=str, default='train', help='save name')
     parser.add_argument('--cfg_or_weight', type=str, default='cw', help='Way to load the model. "c" for loading from cfg, "w" for loading from weight and "cw" for loading from cfg and then loading weight')
+    parser.add_argument('--lr0', type=float, default=1e-5, help='Initial learning rate')
+    parser.add_argument('--lrf', type=float, default=1e-5, help='Final learning rate')
+    parser.add_argument('--momentum', type=float, default=0.937, help='Momentum')
+    parser.add_argument('--weight_decay', type=float, default=0.0005, help='Weight decay')
+    parser.add_argument('--warmup_epochs', type=int, default=3, help='Warmup epochs')
+    parser.add_argument('--warmup_momentum', type=float, default=0.8, help='Warmup momentum')
+    parser.add_argument('--profile', type=bool, default=False, help='Logging performance analysis')
+    parser.add_argument('--patience', type=int, default=100, help='patience')
     
     args = parser.parse_args()
-    data = args.data
+    data = f'../{args.data}'
     cfg = args.cfg
     device = args.device
     epochs = args.epochs
     batch = args.batch
     weight = args.weight
     names = args.names
+    patience = args.patience
     with open(f'../{names}', 'r') as f:
         names = f.read().strip().split('\n')
     resume = args.resume
@@ -35,6 +44,13 @@ if __name__ == '__main__':
     project = args.project
     name = args.name
     cfg_or_weight = args.cfg_or_weight
+    lr0 = args.lr0
+    lrf = args.lrf
+    momentum = args.momentum
+    weight_decay = args.weight_decay
+    warmup_epochs = args.warmup_epochs
+    warmup_momentum = args.warmup_momentum
+    profile = args.profile
     device = [int(x) for x in device.split(',')]
     if cfg_or_weight == 'c':
         model = YOLOWorld(cfg)
@@ -58,6 +74,14 @@ if __name__ == '__main__':
         name=name,
         save_period=save_period,
         names=names,
+        lr0=lr0,
+        lrf=lrf,
+        momentum=momentum,
+        weight_decay=weight_decay,
+        warmup_epochs=warmup_epochs,
+        warmup_momentum=warmup_momentum,
+        profile=profile,
+        patience=patience,
         )
 
 

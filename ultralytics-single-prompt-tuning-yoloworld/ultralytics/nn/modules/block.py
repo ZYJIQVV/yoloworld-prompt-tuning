@@ -190,7 +190,7 @@ class SPPF(nn.Module):
 class SPPFWithClip(nn.Module):
     """Spatial Pyramid Pooling - Fast (SPPF) layer for YOLOv5 by Glenn Jocher."""
 
-    def __init__(self, c1, c2, k=5, n_cls=80, clip_model='ViT-B/32', prompter='PromptLearnerNoLearning', n_ctx=16, ctx_init='', ctx_dim=768,CSC=False):
+    def __init__(self, c1, c2, k=5, n_cls=80, clip_model='ViT-B/32', prompter='PromptLearnerNoLearning', n_ctx=16, ctx_init=None, ctx_dim=768,CSC=False):
         """
         Initializes the SPPF layer with given input/output channels and kernel size.
 
@@ -223,6 +223,8 @@ class SPPFWithClip(nn.Module):
         multi_scale_txt_feats = []
         if isinstance(self.prompt_learner, VisionPromptBaseLearner):
             prompts, tokenized_prompts = self.prompt_learner(x, multi_scale_texts)
+        elif isinstance(self.prompt_learner, NoCtxPromptLearner):
+            prompts, tokenized_prompts = self.prompt_learner(x)
         else:
             prompts, tokenized_prompts = self.prompt_learner(multi_scale_texts)
         if prompts.dtype != x.dtype:
@@ -268,7 +270,95 @@ class TextEncoder(nn.Module):
         x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
 
         return x
+class GlobalLocalPromptLearner(nn.Module):
+    def __init__(self, n_cls, n_ctx, ctx_init, dtype, ctx_dim, token_embedding, CSC=False):
+        super().__init__()
+        # n_cls = len(classnames)
+        self.dtype = dtype
+        self.token_embedding = token_embedding
+        if ctx_init:
+            # use given words to initialize context vectors
+            ctx_init = ctx_init.replace("_", " ")
+            n_ctx = len(ctx_init.split(" "))
+            prompt = clip.tokenize(ctx_init)
+            with torch.no_grad():
+                embedding = self.token_embedding(prompt).type(dtype)
+            ctx_vectors = embedding[0, 1 : 1 + n_ctx, :]
+            prompt_prefix = ctx_init
 
+        else:
+            # random initialization
+            if CSC:
+                # print("Initializing class-specific contexts")
+                ctx_vectors = torch.empty(n_cls, n_ctx, ctx_dim, dtype=dtype)
+            else:
+                # print("Initializing a generic context")
+                ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=dtype) # learnable context; the "[V]1[V]2...[V]M" part of [V]1[V]2...[V]M[CLASS]
+            nn.init.normal_(ctx_vectors, std=0.02)
+            prompt_prefix = " ".join(["X"] * n_ctx) # prompt_prefix is a string like "X X X X X X X X X X X X X X X X"
+
+        # print(f'Initial context: "{prompt_prefix}"')
+        # print(f"Number of context words (tokens): {n_ctx}")
+        self.prompt_prefix = prompt_prefix
+        # self.ctx = nn.Parameter(ctx_vectors)  # to be optimized
+        self.global_ctx = nn.Parameter(ctx_vectors)
+        self.local_ctx = nn.Parameter(ctx_vectors)
+
+        
+        
+        self.n_cls = n_cls
+        self.n_ctx = n_ctx
+        
+        # self.name_lens = name_lens
+        # self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
+
+    def forward(self, texts):
+        
+        texts = list(itertools.chain(*texts))
+        classnames = [name.replace("_", " ") for name in texts]
+        name_lens = [len(_tokenizer.encode(name)) for name in classnames]
+        prompts = [self.prompt_prefix + " " + name + "." for name in classnames] # ["X*n_ctx classname1", "X*n_ctx classname2", ...]
+
+        tokenized_prompts = torch.cat([clip.tokenize(p) for p in prompts]).to(self.token_embedding.weight.device)  # torch.Tensor
+        with torch.no_grad():
+            embedding = self.token_embedding(tokenized_prompts).type(self.dtype)
+        prefix = embedding[:, :1, :]
+        suffix = embedding[:, 1 + self.n_ctx :, :]
+        # These token vectors will be saved when in save_model(),
+        # but they should be ignored in load_model() as we want to use
+        # those computed using the current class names
+        # self.register_buffer("token_prefix", embedding[:, :1, :])  # SOS start of sequence
+        # self.register_buffer("token_suffix", embedding[:, 1 + self.n_ctx :, :])  # CLS, EOS class token and end of sequence
+        self.tokenized_prompts = tokenized_prompts  # torch.Tensor
+        
+        global_ctx = self.global_ctx # learnable context; the "[V]1[V]2...[V]M" part of [V]1[V]2...[V]M[CLASS]
+        local_ctx = self.local_ctx
+        if global_ctx.dim() == 2:
+            global_ctx = global_ctx.unsqueeze(0).expand(prefix.shape[0], -1, -1)
+            local_ctx = local_ctx.unsqueeze(0).expand(prefix.shape[0], -1, -1)
+        # ctx = self.ctx # learnable context; the "[V]1[V]2...[V]M" part of [V]1[V]2...[V]M[CLASS]
+
+
+        global_prompts = torch.cat(
+                [
+                    prefix,  # (n_cls, 1, dim)
+                    global_ctx,     # (n_cls, n_ctx, dim)
+                    suffix,  # (n_cls, *, dim)
+                ],
+                dim=1,
+            )
+        
+        local_prompts = torch.cat(
+                [
+                    prefix,  # (n_cls, 1, dim)
+                    local_ctx,     # (n_cls, n_ctx, dim)
+                    suffix,  # (n_cls, *, dim)
+                ],
+                dim=1,
+            )
+
+
+        return [global_prompts, local_prompts], tokenized_prompts
 class VisionPromptBaseLearner(nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__()
@@ -589,8 +679,41 @@ class PromptLearnerUsingMLP(nn.Module):
         return prompts, tokenized_prompts
 
 
+class NoCtxPromptLearner(nn.Module):
+    def __init__(self, n_cls, n_ctx, texts=None, dtype=None, ctx_dim=None, token_embedding=None, CSC=False):
+        super().__init__()
+        # n_cls = len(classnames)
+        self.dtype = dtype
+        self.token_embedding = token_embedding
+        self.bos_token="<|startoftext|>"
+        self.eos_token="<|endoftext|>"
+        self.texts = texts
+        if texts is not None:
+            classnames = [name.replace("_", " ") for name in texts]
+            self.prompts = [self.bos_token + " " + name + self.eos_token for name in classnames] # ["classname1", "classname2", ...]
+            self.tokenized_prompts = torch.cat([clip.tokenize(p) for p in self.prompts]).to(self.token_embedding.weight.device)
+            with torch.no_grad():
+                embedding = self.token_embedding(self.tokenized_prompts).type(self.dtype)
+            self.prompts = nn.Parameter(embedding).to(dtype)
+        else:
+            self.prompts = torch.empty(n_cls, n_ctx, ctx_dim, dtype=dtype)
+        self.n_cls = n_cls
+        self.n_ctx = n_ctx
+        
+        # self.name_lens = name_lens
+        # self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        prompts = self.prompts
+        tokenized_prompts = self.tokenized_prompts
+        if len(prompts.size()) == 2:
+            prompts = prompts.unsqueeze(0).expand(batch_size, -1, -1)
+        return prompts, tokenized_prompts
+
+
 class PromptLearner(nn.Module):
-    def __init__(self, n_cls, n_ctx, ctx_init, dtype, ctx_dim, token_embedding, CSC=False):
+    def __init__(self, n_cls, n_ctx, ctx_init="a photo of ", dtype=None, ctx_dim=None, token_embedding=None, CSC=False):
         super().__init__()
         # n_cls = len(classnames)
         self.dtype = dtype
@@ -599,6 +722,7 @@ class PromptLearner(nn.Module):
             # use given words to initialize context vectors
             ctx_init = ctx_init.replace("_", " ")
             n_ctx = len(ctx_init.split(" "))
+            # print("using ctx_init = ", ctx_init)
             prompt = clip.tokenize(ctx_init)
             with torch.no_grad():
                 embedding = self.token_embedding(prompt).type(dtype)
